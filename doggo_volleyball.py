@@ -6,8 +6,6 @@
 import pygame
 import sys
 import os
-import requests # To download images from URLs
-import io       # To handle image data in memory
 import random
 
 # --- Constants ---
@@ -31,53 +29,71 @@ NET_WIDTH = 10
 NET_X = SCREEN_WIDTH // 2 - NET_WIDTH // 2
 NET_RECT = pygame.Rect(NET_X, GROUND_Y - NET_HEIGHT, NET_WIDTH, NET_HEIGHT)
 
-# Sprite Info (Based on user confirmation)
-SPRITE_WIDTH = 64
-SPRITE_HEIGHT = 64
+# Movement Physics
+JUMP_POWER = -12  # Negative because y-axis is inverted
+ACCELERATION = 0.8  # How quickly to accelerate
+DECELERATION = 0.85  # Friction/drag factor (0-1)
+MAX_SPEED = 8  # Maximum horizontal speed
+
+# Sprite Info (Based on wolf sprite sheet dimensions)
+SPRITE_WIDTH = 16
+SPRITE_HEIGHT = 16
 
 # Scaling
-DOG_SCALE_FACTOR = 1.5 # Adjust size as needed
+DOG_SCALE_FACTOR = 5 # Adjust size as needed
 DOG_DRAW_WIDTH = int(SPRITE_WIDTH * DOG_SCALE_FACTOR)
 DOG_DRAW_HEIGHT = int(SPRITE_HEIGHT * DOG_SCALE_FACTOR)
 
 # Animation Info
-WALK_FRAMES_INFO = {'row': 0, 'count': 6}
-RUN_FRAMES_INFO = {'row': 1, 'count': 6}
-IDLE_FRAMES_INFO = {'row': 2, 'count': 4}
+WALK_FRAMES_INFO = {'row': 0, 'count': 8}  # Using all 4 frames for all animations
+RUN_FRAMES_INFO = {'row': 0, 'count': 8}   # Using all 4 frames for all animations
+IDLE_FRAMES_INFO = {'row': 0, 'count': 8}   # Using all 4 frames for all animations
 
-ANIMATION_FPS = 5 # How many times per second the animation frame changes
+ANIMATION_FPS = 10 # How many times per second the animation frame changes
 WALK_TO_RUN_THRESHOLD = 20 # Game loop frames (~1/3 sec) of continuous movement
 
 # --- Asset Loading ---
 
-def fetch_image(url):
-    """Downloads an image from a URL and returns image data."""
+def load_image(file_path):
+    """Loads an image from a file path."""
     try:
-        response = requests.get(url)
-        response.raise_for_status() # Raise an exception for bad status codes
-        return io.BytesIO(response.content)
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching image from {url}: {e}")
+        return pygame.image.load(file_path).convert_alpha()
+    except pygame.error as e:
+        print(f"Error loading image from {file_path}: {e}")
         return None
 
-def load_sprite_sheet(image_data, frame_width, frame_height):
-    """Loads a sprite sheet from image data and extracts frames."""
-    if image_data is None:
-        return None, 0, 0 # Return None if image data failed to fetch
+def load_sprite_sheet(sheet, frame_width, frame_height):
+    """Loads a sprite sheet and extracts frames."""
+    if sheet is None:
+        return None, 0, 0 # Return None if sheet failed to load
 
     try:
-        sheet = pygame.image.load(image_data).convert_alpha()
         sheet_width, sheet_height = sheet.get_size()
         rows = sheet_height // frame_height
         cols = sheet_width // frame_width
-        
+
+        # Debug information
+        print(f"Sprite sheet dimensions: {sheet_width}x{sheet_height}")
+        print(f"Frame dimensions: {frame_width}x{frame_height}")
+        print(f"Calculated: {rows} rows, {cols} cols")
+
         frames = []
         for r in range(rows):
             row_frames = []
             for c in range(cols):
-                rect = pygame.Rect(c * frame_width, r * frame_height, frame_width, frame_height)
+                # Calculate exact pixel coordinates for this frame
+                x = c * frame_width
+                y = r * frame_height
+                # Create a rect for this specific frame
+                rect = pygame.Rect(x, y, frame_width, frame_height)
+                # Extract just this frame from the sheet
                 frame = sheet.subsurface(rect)
-                row_frames.append(frame)
+                # Create a new surface with per-pixel alpha to ensure clean isolation
+                clean_frame = pygame.Surface((frame_width, frame_height), pygame.SRCALPHA)
+                # Copy the frame to the new surface
+                clean_frame.blit(frame, (0, 0))
+                # Add the clean frame to our row
+                row_frames.append(clean_frame)
             frames.append(row_frames)
         print(f"Loaded sprite sheet: {sheet_width}x{sheet_height}, {rows} rows, {cols} cols")
         return frames, sheet_width, sheet_height
@@ -125,9 +141,17 @@ class Dog(pygame.sprite.Sprite):
         self.rect = self.image.get_rect()
         self.rect.bottomleft = (x, y) # Use bottomleft for ground alignment
 
-        self.dx = 0
+        # Physics properties
+        self.dx = 0  # Horizontal velocity
+        self.dy = 0  # Vertical velocity
         self.speed = speed
         self.moving_timer = 0
+        self.is_jumping = False
+        self.is_grounded = True
+
+        # For precise position tracking
+        self.x = float(self.rect.x)
+        self.y = float(self.rect.y)
 
     def update_animation_state(self):
         """Determines the correct animation state based on movement."""
@@ -171,91 +195,208 @@ class Dog(pygame.sprite.Sprite):
             bottom = self.rect.bottom
             self.rect = self.image.get_rect(bottom=bottom, centerx=self.rect.centerx)
 
+    def jump(self):
+        """Make the dog jump if it's on the ground."""
+        if self.is_grounded:
+            self.dy = JUMP_POWER
+            self.is_jumping = True
+            self.is_grounded = False
+
+    def apply_physics(self):
+        """Apply gravity and handle ground collision."""
+        # Apply gravity
+        self.dy += GRAVITY
+
+        # Apply horizontal deceleration (friction)
+        if abs(self.dx) > 0.1:
+            self.dx *= DECELERATION
+        else:
+            self.dx = 0  # Stop completely if very slow
+
+        # Cap horizontal speed
+        if self.dx > MAX_SPEED:
+            self.dx = MAX_SPEED
+        elif self.dx < -MAX_SPEED:
+            self.dx = -MAX_SPEED
+
+        # Update position with velocity
+        self.x += self.dx
+        self.y += self.dy
+
+        # Update rect position from float values
+        self.rect.x = int(self.x)
+        self.rect.y = int(self.y)
+
+        # Check for ground collision
+        if self.rect.bottom >= GROUND_Y:
+            self.rect.bottom = GROUND_Y
+            self.y = float(self.rect.y)
+            self.dy = 0
+            self.is_grounded = True
+            self.is_jumping = False
 
     def update(self):
         """Placeholder for movement logic - to be implemented in subclasses."""
         self.update_animation_state()
         self.animate()
-        # Apply movement (example, replace in subclasses)
-        # self.rect.x += self.dx
+        self.apply_physics()
 
 
 class Player(Dog):
     def __init__(self, x, y, speed, animations):
         super().__init__(x, y, speed, animations)
+        self.space_pressed_last_frame = False  # Track space bar state for serve release
 
     def update(self):
+        global game_state, serve_power, serve_charging
+
         keys_pressed = pygame.key.get_pressed()
         is_moving_left = keys_pressed[pygame.K_LEFT]
         is_moving_right = keys_pressed[pygame.K_RIGHT]
-        is_trying_to_move = is_moving_left or is_moving_right
+        is_up_pressed = keys_pressed[pygame.K_UP]  # Changed to up arrow for jumping
+        is_space_pressed = keys_pressed[pygame.K_SPACE]  # Space is now only for serving
 
-        if is_moving_left:
-            self.dx = -self.speed
-        elif is_moving_right:
-            self.dx = self.speed
-        else:
-            self.dx = 0
+        # Handle serving state
+        if game_state == 'serving' and serve_side == 'player':
+            # Start charging serve when space is pressed
+            if is_space_pressed and not serve_charging:
+                serve_charging = True
+                serve_power = 0
 
-        # Update state based on dx (which reflects input)
-        self.update_animation_state() # Determines state and increments/resets timer
-        self.animate() # Updates self.image based on state
+            # Continue charging while space is held
+            elif is_space_pressed and serve_charging:
+                serve_power = min(serve_power + SERVE_POWER_RATE, MAX_SERVE_POWER)
 
-        # Apply movement
-        self.rect.x += self.dx
+            # Release serve when space is released after charging
+            elif not is_space_pressed and serve_charging and self.space_pressed_last_frame:
+                serve_charging = False
+                # Serve the ball with the charged power
+                ball.serve_with_power(serve_side, serve_power)
+                game_state = 'playing'
+                serve_power = 0  # Reset serve power
+
+            # Allow movement during serving
+            if is_moving_left:
+                self.dx -= ACCELERATION  # Accelerate left
+            elif is_moving_right:
+                self.dx += ACCELERATION  # Accelerate right
+
+        # Normal gameplay controls
+        elif game_state == 'playing':
+            # Handle jumping with UP arrow
+            if is_up_pressed:
+                self.jump()
+
+            # Apply acceleration based on input
+            if is_moving_left:
+                self.dx -= ACCELERATION  # Accelerate left
+            elif is_moving_right:
+                self.dx += ACCELERATION  # Accelerate right
+
+        # Update space bar state for next frame
+        self.space_pressed_last_frame = is_space_pressed
+
+        # Update animation state based on movement
+        self.update_animation_state()
+        self.animate()
+
+        # Apply physics (gravity, velocity, collisions)
+        self.apply_physics()
 
         # Boundary checks
         if self.rect.left < 0:
             self.rect.left = 0
-        if self.rect.right > NET_X: # Player stays left of net
+            self.x = float(self.rect.x)  # Update float position
+        if self.rect.right > NET_X:  # Player stays left of net
             self.rect.right = NET_X
-        # Ensure y stays correct (in case of future jump implementation)
-        self.rect.bottom = GROUND_Y
+            self.x = float(self.rect.x)  # Update float position
 
 
 class AI(Dog):
     def __init__(self, x, y, speed, animations, ball_ref):
         super().__init__(x, y, speed, animations)
         self.ball = ball_ref # Reference to the ball sprite
+        self.jump_cooldown = 0
+        self.serve_timer = 0  # Timer for AI serving
+        self.serve_delay = 60  # Frames to wait before serving (1 second)
 
     def update(self):
-        intended_dx = 0
-        # Simple AI: Move towards the ball's x-position if it's on AI side or coming towards AI
-        target_x = self.ball.rect.centerx
-        ai_center = self.rect.centerx
+        global game_state, serve_power
 
-        # Only actively move if ball is reasonably close or moving towards AI
-        if self.ball.dx < 0 or self.ball.rect.centerx > SCREEN_WIDTH / 2:
-            if ai_center < target_x - self.rect.width * 0.3: # Move right if ball is to the right
-                 intended_dx = self.speed
-            elif ai_center > target_x + self.rect.width * 0.3: # Move left if ball is to the left
-                 intended_dx = -self.speed
-            # Add some randomness or imperfection? Maybe a reaction delay? (Optional)
+        # Handle serving state for AI
+        if game_state == 'serving' and serve_side == 'ai':
+            # Move to a good serving position
+            default_serve_pos_x = SCREEN_WIDTH * 3 / 4
+            if self.rect.centerx < default_serve_pos_x - 10:
+                self.dx += ACCELERATION * 0.4
+            elif self.rect.centerx > default_serve_pos_x + 10:
+                self.dx -= ACCELERATION * 0.4
+            else:
+                self.dx *= DECELERATION  # Slow down when in position
 
-        else:
-             # If ball is far on player side, maybe slowly return to center?
-             default_pos_x = SCREEN_WIDTH * 3 / 4
-             if ai_center < default_pos_x - self.speed * 0.5:
-                 intended_dx = self.speed * 0.5
-             elif ai_center > default_pos_x + self.speed * 0.5:
-                 intended_dx = -self.speed * 0.5
+                # Start the serve timer once in position
+                if self.serve_timer == 0:
+                    self.serve_timer = self.serve_delay
 
-        self.dx = intended_dx
+            # Count down the serve timer
+            if self.serve_timer > 0:
+                self.serve_timer -= 1
+                # AI charges serve power gradually
+                serve_power = MAX_SERVE_POWER * (1 - (self.serve_timer / self.serve_delay))
 
-        # Update state based on dx
+                # Serve when timer reaches zero
+                if self.serve_timer == 0:
+                    # Serve with random power between 60-90%
+                    power = random.uniform(60, 90)
+                    ball.serve_with_power(serve_side, power)
+                    game_state = 'playing'
+                    serve_power = 0  # Reset serve power
+
+        # Normal gameplay AI
+        elif game_state == 'playing':
+            # Simple AI: Move towards the ball's x-position if it's on AI side or coming towards AI
+            target_x = self.ball.rect.centerx
+            ai_center = self.rect.centerx
+
+            # Only actively move if ball is reasonably close or moving towards AI
+            if self.ball.dx < 0 or self.ball.rect.centerx > SCREEN_WIDTH / 2:
+                if ai_center < target_x - self.rect.width * 0.3: # Move right if ball is to the right
+                    self.dx += ACCELERATION * 0.8  # AI accelerates a bit slower than player
+                elif ai_center > target_x + self.rect.width * 0.3: # Move left if ball is to the left
+                    self.dx -= ACCELERATION * 0.8
+
+                # Jump if the ball is above the AI and close enough horizontally
+                if (self.ball.rect.bottom < self.rect.top + 50 and
+                    abs(self.ball.rect.centerx - self.rect.centerx) < 100 and
+                    self.jump_cooldown <= 0 and self.is_grounded):
+                    self.jump()
+                    self.jump_cooldown = 45  # Increased cooldown to make AI less aggressive
+            else:
+                # If ball is far on player side, maybe slowly return to center
+                default_pos_x = SCREEN_WIDTH * 3 / 4
+                if ai_center < default_pos_x - self.speed * 0.5:
+                    self.dx += ACCELERATION * 0.4  # Gentle acceleration toward default position
+                elif ai_center > default_pos_x + self.speed * 0.5:
+                    self.dx -= ACCELERATION * 0.4
+
+        # Decrement jump cooldown
+        if self.jump_cooldown > 0:
+            self.jump_cooldown -= 1
+
+        # Update animation state based on movement
         self.update_animation_state()
         self.animate()
 
-        # Apply movement
-        self.rect.x += self.dx
+        # Apply physics (gravity, velocity, collisions)
+        self.apply_physics()
 
         # Boundary checks
         if self.rect.left < NET_X + NET_WIDTH: # AI stays right of net
             self.rect.left = NET_X + NET_WIDTH
+            self.x = float(self.rect.x)  # Update float position
         if self.rect.right > SCREEN_WIDTH:
             self.rect.right = SCREEN_WIDTH
-        # Ensure y stays correct
-        self.rect.bottom = GROUND_Y
+            self.x = float(self.rect.x)  # Update float position
 
 
 class Ball(pygame.sprite.Sprite):
@@ -272,13 +413,18 @@ class Ball(pygame.sprite.Sprite):
         self.y = float(self.rect.centery)
 
     def update(self):
-        # Apply gravity
-        self.dy += GRAVITY
-        # Update precise position
-        self.x += self.dx
-        self.y += self.dy
-        # Update rect position based on float values
-        self.rect.center = (round(self.x), round(self.y))
+        global game_state
+
+        # Only apply physics when in playing state
+        if game_state == 'playing':
+            # Apply gravity
+            self.dy += GRAVITY
+            # Update precise position
+            self.x += self.dx
+            self.y += self.dy
+            # Update rect position based on float values
+            self.rect.center = (round(self.x), round(self.y))
+        # In serving state, the ball stays in place (no gravity)
 
         # Wall collisions
         if self.rect.left <= 0:
@@ -334,18 +480,36 @@ class Ball(pygame.sprite.Sprite):
         return None
 
     def reset(self, serve_side):
-        """Resets ball position and velocity for the next serve."""
-        self.y = SCREEN_HEIGHT / 3
+        """Resets ball position for the next serve without setting velocity."""
         self.dy = 0
+        self.dx = 0
+
+        # Position the ball above the server
         if serve_side == 'player':
             self.x = SCREEN_WIDTH / 4
-            self.dx = 4 + random.uniform(-1, 1) # Serve towards AI
-            self.dy = -7 + random.uniform(-1, 1)
+            self.y = SCREEN_HEIGHT / 3
         else: # AI serves
             self.x = SCREEN_WIDTH * 3 / 4
-            self.dx = -4 + random.uniform(-1, 1) # Serve towards Player
-            self.dy = -7 + random.uniform(-1, 1)
+            self.y = SCREEN_HEIGHT / 3
+
         self.rect.center = (round(self.x), round(self.y))
+
+    def serve_with_power(self, serve_side, power):
+        """Serves the ball with the given power (0-100)."""
+        # Convert power percentage to actual velocity
+        power_factor = power / 100.0
+
+        # Base velocities
+        base_dx = 4
+        base_dy = -7
+
+        # Apply power factor (more power = faster serve)
+        if serve_side == 'player':
+            self.dx = base_dx * (0.5 + power_factor) + random.uniform(-0.5, 0.5)
+            self.dy = base_dy * (0.5 + power_factor) + random.uniform(-0.5, 0.5)
+        else: # AI serves
+            self.dx = -base_dx * (0.5 + power_factor) + random.uniform(-0.5, 0.5)
+            self.dy = base_dy * (0.5 + power_factor) + random.uniform(-0.5, 0.5)
 
 
 class Button:
@@ -410,25 +574,51 @@ except Exception as e:
 
 
 # --- Load and Process Sprites ---
-player_sheet_url = 'https://i.imgur.com/d2g12jg.png' # Black Dog
-ai_sheet_url = 'https://i.imgur.com/LQcxtwC.png'     # White Dog
+wolf_sheet_path = 'assets/Dog Wolf Spritesheet.png' # Wolf sprite sheet
 
-player_image_data = fetch_image(player_sheet_url)
-ai_image_data = fetch_image(ai_sheet_url)
+wolf_sheet = load_image(wolf_sheet_path)
 
-player_all_frames, _, _ = load_sprite_sheet(player_image_data, SPRITE_WIDTH, SPRITE_HEIGHT)
-ai_all_frames, _, _ = load_sprite_sheet(ai_image_data, SPRITE_WIDTH, SPRITE_HEIGHT)
+# Load the sprite sheet once
+wolf_all_frames, _, _ = load_sprite_sheet(wolf_sheet, SPRITE_WIDTH, SPRITE_HEIGHT)
 
-# Create animation dictionaries
+# Since there's only one row, we'll split it into two parts
+# First two sprites for player, last two for AI
+if wolf_all_frames and len(wolf_all_frames[0]) >= 4:
+    # Player uses first two sprites (0 and 1) - flip them horizontally
+    player_frames = [
+        pygame.transform.flip(wolf_all_frames[0][0], True, False),
+        pygame.transform.flip(wolf_all_frames[0][1], True, False)
+    ]
+
+    # AI uses last two sprites (2 and 3) with a red tint
+    ai_frames = []
+    for i in range(2, 4):
+        # Create a copy of the frame
+        ai_frame = wolf_all_frames[0][i].copy()
+        # Apply a red tint
+        red_overlay = pygame.Surface(ai_frame.get_size(), pygame.SRCALPHA)
+        red_overlay.fill((150, 50, 50, 100))  # Semi-transparent red
+        ai_frame.blit(red_overlay, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        ai_frames.append(ai_frame)
+
+    # Create new frame arrays
+    player_all_frames = [[player_frames[0], player_frames[1], player_frames[0], player_frames[1]]]
+    ai_all_frames = [[ai_frames[0], ai_frames[1], ai_frames[0], ai_frames[1]]]
+else:
+    # Fallback if sprite sheet doesn't have enough frames
+    player_all_frames = wolf_all_frames
+    ai_all_frames = wolf_all_frames
+
+# Create animation dictionaries - using the frames directly since we've already prepared them
 player_animations = {
-    'idle': get_animation_frames(player_all_frames, IDLE_FRAMES_INFO),
-    'walk': get_animation_frames(player_all_frames, WALK_FRAMES_INFO),
-    'run': get_animation_frames(player_all_frames, RUN_FRAMES_INFO),
+    'idle': player_all_frames[0],
+    'walk': player_all_frames[0],
+    'run': player_all_frames[0],
 }
 ai_animations = {
-    'idle': get_animation_frames(ai_all_frames, IDLE_FRAMES_INFO),
-    'walk': get_animation_frames(ai_all_frames, WALK_FRAMES_INFO),
-    'run': get_animation_frames(ai_all_frames, RUN_FRAMES_INFO),
+    'idle': ai_all_frames[0],
+    'walk': ai_all_frames[0],
+    'run': ai_all_frames[0],
 }
 
 # Check if animations loaded correctly (at least idle should have something)
@@ -439,12 +629,20 @@ if not player_animations['idle'] or not ai_animations['idle']:
 
 
 # --- Game State Variables ---
-game_state = 'start_menu' # 'start_menu', 'options', 'how_to_play', 'playing', 'serving', 'game_over'
+game_state = 'start_menu' # 'start_menu', 'options', 'how_to_play', 'playing', 'serving', 'point_pause', 'game_over'
 player_score = 0
 ai_score = 0
 winning_score = 5
 serve_side = 'player' # 'player' or 'ai'
 winner = None
+
+# Serve mechanics
+serve_power = 0  # Current serve power (0-100)
+MAX_SERVE_POWER = 100  # Maximum serve power
+SERVE_POWER_RATE = 2  # How fast the power meter increases
+serve_charging = False  # Whether the player is currently charging a serve
+point_pause_timer = 0  # Timer for pause between points
+POINT_PAUSE_DURATION = 60  # Frames to pause after a point (1 second at 60 FPS)
 
 # --- Create Sprites and Groups ---
 all_sprites = pygame.sprite.Group()
@@ -516,7 +714,6 @@ def options_menu():
     global game_state, winning_score
     title_text = "Options"
     options = [3, 5, 7, 10]
-    selected_index = options.index(winning_score) if winning_score in options else 1 # Default to 5
 
     option_buttons = []
     button_y = SCREEN_HEIGHT // 2 - 50
@@ -637,34 +834,59 @@ def game_over_menu():
 # --- Helper Functions ---
 def reset_game():
     """Resets scores, positions, and serve."""
-    global player_score, ai_score, serve_side, winner
+    global player_score, ai_score, serve_side, winner, serve_power, serve_charging, game_state, point_pause_timer
+
+    # Reset scores
     player_score = 0
     ai_score = 0
     winner = None
-    player.reset() # Assuming Dog class has a reset method or we reset manually
+
+    # Reset serve mechanics
+    serve_power = 0
+    serve_charging = False
+    point_pause_timer = 0
+
+    # Reset player and AI
+    player.reset()
     ai.reset()
+    ai_additional_reset()  # Call the additional AI reset function
+
+    # Reset positions
     player.rect.bottomleft = (SCREEN_WIDTH / 4 - player.rect.width / 2, GROUND_Y)
     ai.rect.bottomleft = (SCREEN_WIDTH * 3 / 4 - ai.rect.width / 2, GROUND_Y)
+
+    # Update float positions
+    player.x = float(player.rect.x)
+    player.y = float(player.rect.y)
+    ai.x = float(ai.rect.x)
+    ai.y = float(ai.rect.y)
+
+    # Reset ball and serve
     serve_side = 'player' if random.random() < 0.5 else 'ai'
     ball.reset(serve_side)
-    # Add reset calls to player/ai if they have specific reset logic
-    player.movingTimer = 0
-    ai.movingTimer = 0
-    player.state = 'idle'
-    ai.state = 'idle'
+
+    # Set game state to serving
+    game_state = 'serving'
 
 
 # Add a basic reset method to Dog class if needed, or handle in reset_game
 def dog_reset(dog_instance):
-     dog_instance.currentFrames = dog_instance.animations['idle']
-     dog_instance.frameIndex = 0
-     dog_instance.movingTimer = 0
+     dog_instance.frame_index = 0
+     dog_instance.moving_timer = 0
      dog_instance.state = 'idle'
      dog_instance.dx = 0
+     dog_instance.dy = 0
+     dog_instance.is_jumping = False
+     dog_instance.is_grounded = True
      # Reset position in reset_game
 
 player.reset = lambda: dog_reset(player)
 ai.reset = lambda: dog_reset(ai)
+
+# Additional AI reset
+def ai_additional_reset():
+    ai.jump_cooldown = 0  # Reset AI jump cooldown
+    ai.serve_timer = 0    # Reset AI serve timer
 
 # --- Main Game Loop ---
 running = True
@@ -691,6 +913,16 @@ while running:
         # Add other event handling if needed (e.g., pause key)
 
     # --- Game Updates ---
+    # Handle point pause state
+    if game_state == 'point_pause':
+        point_pause_timer -= 1
+        if point_pause_timer <= 0:
+            game_state = 'serving'
+            # Reset AI serve timer when transitioning to serving state
+            if serve_side == 'ai':
+                ai.serve_timer = 0
+
+    # Update sprites in playing or serving states
     if game_state == 'playing' or game_state == 'serving':
         all_sprites.update() # Calls update() on player, ai, ball
 
@@ -704,12 +936,20 @@ while running:
                  collided_dog = ai
 
              if collided_dog:
-                 # Simple vertical bounce based on relative position
+                 # Calculate hit angle based on relative position
                  hit_angle = (ball.rect.centerx - collided_dog.rect.centerx) / (collided_dog.rect.width / 2) # -1 to 1
-                 ball.dx = hit_angle * 7 # Bounce angle depends on hit location
-                 ball.dy = -8 - random.uniform(0, 2) # Bounce upwards strongly
-                 # Add dog's dx? ball.dx += collided_dog.dx * 0.5
-                 ball.y = collided_dog.rect.top - ball.radius - 1 # Move ball out of dog
+
+                 # Add dog's momentum to the ball
+                 ball.dx = hit_angle * 7 + (collided_dog.dx * 0.6)  # Bounce angle depends on hit location + dog's momentum
+
+                 # Stronger bounce if dog is moving up (jumping)
+                 if collided_dog.dy < 0:  # Dog is moving upward
+                     ball.dy = -10 - random.uniform(0, 2) - abs(collided_dog.dy * 0.3)  # Extra bounce from jump
+                 else:
+                     ball.dy = -8 - random.uniform(0, 2)  # Standard bounce
+
+                 # Move ball out of dog
+                 ball.y = collided_dog.rect.top - ball.radius - 1
                  ball.rect.centery = round(ball.y)
 
 
@@ -731,9 +971,11 @@ while running:
                 winner = "AI"
                 game_state = 'game_over'
             else:
-                # Reset for next serve
+                # Start point pause
+                game_state = 'point_pause'
+                point_pause_timer = POINT_PAUSE_DURATION
+                # Reset ball position but don't serve yet
                 ball.reset(serve_side)
-                game_state = 'serving' # Or directly to playing? Add delay?
 
     # --- Drawing ---
     screen.fill(SKY_BLUE) # Background
@@ -751,6 +993,50 @@ while running:
     # Draw Score
     score_text = f"Player: {player_score} - AI: {ai_score}"
     draw_text(score_text, score_font, WHITE, screen, SCREEN_WIDTH // 2, 30)
+
+    # Draw serve instructions when in serving state
+    if game_state == 'serving':
+        if serve_side == 'player':
+            instruction_text = "Hold SPACE to charge serve, release to serve"
+            draw_text(instruction_text, button_font, WHITE, screen, SCREEN_WIDTH // 2, 70)
+
+            # Only draw power meter when actively charging a serve
+            if serve_charging:
+                # Draw power meter
+                meter_width = 300
+                meter_height = 20
+                meter_x = (SCREEN_WIDTH - meter_width) // 2
+                meter_y = 100
+
+                # Draw meter background
+                pygame.draw.rect(screen, GREY, (meter_x, meter_y, meter_width, meter_height))
+
+                # Draw filled portion based on serve_power
+                fill_width = int((serve_power / MAX_SERVE_POWER) * meter_width)
+
+                # Color changes from green to yellow to red as power increases
+                if serve_power < MAX_SERVE_POWER * 0.33:
+                    meter_color = (0, 255, 0)  # Green
+                elif serve_power < MAX_SERVE_POWER * 0.66:
+                    meter_color = (255, 255, 0)  # Yellow
+                else:
+                    meter_color = (255, 0, 0)  # Red
+
+                pygame.draw.rect(screen, meter_color, (meter_x, meter_y, fill_width, meter_height))
+
+                # Draw meter border
+                pygame.draw.rect(screen, WHITE, (meter_x, meter_y, meter_width, meter_height), 2)
+        else:
+            instruction_text = "AI is preparing to serve..."
+            draw_text(instruction_text, button_font, WHITE, screen, SCREEN_WIDTH // 2, 70)
+
+    # Draw point pause message
+    if game_state == 'point_pause':
+        if serve_side == 'ai':  # Player scored last, so AI serves next
+            pause_text = "Player scores!"
+        else:  # AI scored last, so player serves next
+            pause_text = "AI scores!"
+        draw_text(pause_text, score_font, GOLD, screen, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 3)
 
     # --- Update Display ---
     pygame.display.flip()
