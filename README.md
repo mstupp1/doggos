@@ -2,7 +2,7 @@
 
 A fun and adorable volleyball game featuring cute wolf sprites! Challenge the AI in this fast-paced sports game built with Python and Pygame.
 
-![Doggo Volleyball Screenshot](screenshot.png)
+![Doggo Volleyball Screenshot](https://i.imgur.com/VIPMVfz.png)
 
 ## 🎮 How to Play
 
